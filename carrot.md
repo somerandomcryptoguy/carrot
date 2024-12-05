@@ -313,10 +313,11 @@ For each transaction, we assign a value `input_context`, whose purpose is to be 
 
 | transaction type | `input_context`                                   |
 |----------------- |-------------------------------------------------- |
-| coinbase         | <code>"C" \|\| IntToBytes256(block height)</code> |
+| coinbase (miner) | <code>"C" \|\| IntToBytes256(block height)</code> |
+| protocol         | <code>"P" \|\| IntToBytes256(block height)</code> |
 | non-coinbase     | <code>"R" \|\| first spent key image</code>       |
 
-This uniqueness is guaranteed by consensus rules: there is exactly one coinbase transaction per block height, and all key images are unique. Indirectly binding output pubkeys to this value helps to mitigate burning bugs.
+This uniqueness is guaranteed by consensus rules: there is exactly one coinbase and one protocol transaction per block height, and all key images are unique. Indirectly binding output pubkeys to this value helps to mitigate burning bugs.
 
 ### 7.3 Enote format
 
@@ -361,19 +362,22 @@ The enote components are derived from the shared secrets <code>s<sub>sr</sub></c
 |<code>anchor<sub>norm</sub></code>|janus anchor, normal| <code>anchor<sub>norm</sub> = RandBytes(16)</code> |
 |<code>anchor<sub>sp</sub></code>|janus anchor, special| <code>anchor<sub>sp</sub> = SecretDerive("Carrot janus anchor special" \|\| D<sub>e</sub> \|\| input_context \|\| K<sub>o</sub> \|\| k<sub>v</sub> \|\| K<sub>s</sub>)</code> |
 |<code>d<sub>e</sub></code>|ephemeral private key| <code>d<sub>e</sub> = ScalarDerive("Carrot sending key normal" \|\| anchor<sub>norm</sub> \|\| input_context \|\| K<sub>s</sub><sup>j</sup> \|\| K<sub>v</sub><sup>j</sup> \|\| pid)</code> |
+|<code>y</code>|return payment scalar| <code>y = ScalarDerive("Carrot return address scalar" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| C<sub>a</sub>)</code> |
 
 The variable `enote_type` is `"payment"` or `"change"` depending on the human-meaningful tag that a sender wants to express to the recipient. However, `enote_type` must be equal to `"payment"` for coinbase enotes.
 
 #### 7.4.2 Component Values
 
-| Symbol                           | Name                  | Derivation |
-|----------------------------------|-----------------------|------------|
-|<code>K<sub>o</sub></code>        | output pubkey         | <code>K<sub>o</sub> = K<sub>s</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
-|<code>C<sub>a</sub></code>        | amount commitment     | <code>C<sub>a</sub> = k<sub>a</sub> G + a H</code> |
-|<code>a<sub>enc</sub></code>      | encrypted amount      | <code>a<sub>enc</sub> = a ⊕ m<sub>a</sub></code>   |
-|`vt`                              |view tag               | <code>vt = SecretDerive("Carrot view tag" \|\| s<sub>sr</sub> \|\| input_context \|\| K<sub>o</sub>)</code> |
-|<code>anchor<sub>enc</sub></code> |encrypted Janus anchor | <code>anchor<sub>enc</sub> = (anchor<sub>sp</sub> if <i>special enote</i>, else anchor<sub>norm</sub>) ⊕ m<sub>anchor</sub></code> |
-|<code>pid<sub>enc</sub></code>    |encrypted payment ID   | <code>pid<sub>enc</sub> = pid ⊕ m<sub>pid</sub></code> |
+| Symbol                                     | Name                   | Derivation |
+|--------------------------------------------|------------------------|------------|
+|<code>K<sub>o</sub></code>                  | output pubkey          | <code>K<sub>o</sub> = K<sub>s</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
+|<code>K<sub>o</sub><sup>return</sup></code> | output pubkey (return) | <code>K<sub>o</sub><sup>return</sup> = (y F) + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
+|<code>C<sub>a</sub></code>                  | amount commitment      | <code>C<sub>a</sub> = k<sub>a</sub> G + a H</code> |
+|<code>a<sub>enc</sub></code>                | encrypted amount       | <code>a<sub>enc</sub> = a ⊕ m<sub>a</sub></code>   |
+|`vt`                                        | view tag               | <code>vt = SecretDerive("Carrot view tag" \|\| s<sub>sr</sub> \|\| input_context \|\| K<sub>o</sub>)</code> |
+|<code>anchor<sub>enc</sub></code>           | encrypted Janus anchor | <code>anchor<sub>enc</sub> = (anchor<sub>sp</sub> if <i>special enote</i>, else anchor<sub>norm</sub>) ⊕ m<sub>anchor</sub></code> |
+|<code>pid<sub>enc</sub></code>              | encrypted payment ID   | <code>pid<sub>enc</sub> = pid ⊕ m<sub>pid</sub></code> |
+|<code>F</code>                              |return address EC point | <code>F = (y<sup>-1</sup>) k<sub>v</sub> K<sub>o</sub><sup>change</sup></code> |
 
 The view tag binds to `input_context` so that an external observer (i.e. someone without knowledge of <code>s<sub>sr</sub></code>) cannot simply copy <code>D<sub>e</sub></code>, <code>K<sub>o</sub></code>, and `vt` into a new transaction to force a view tag match. Binding to `input_context` causes the view tag of a copied enote to match with the same probability as any random, unrelated enote.
 
@@ -438,9 +442,67 @@ Coinbase transactions are not considered to be internal.
 
 Miners should continue the practice of only allowing main addresses for the destinations of coinbase transactions in Carrot. This is because, unlike normal enotes, coinbase enotes do not contain an amount commitment, and thus scanning a coinbase enote commitment has no "hard target". If subaddresses can be the destinations of coinbase transactions, then the scanner *must* have their subaddress table loaded and populated to correctly scan coinbase enotes. If only main addresses are allowed, then the scanner does not need the table and can instead simply check whether <code>K<sub>s</sub><sup>0</sup> ?= K<sub>o</sub> - k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code>.
 
-## 8. Balance recovery
+## 8. Spend Proof and Anonymised Returns for CARROT (SPARC)
 
-### 8.1 Enote Scan
+### 8.1 Overview
+
+SPARC is a suite of extensions to the CARROT transaction scheme, all of which are built into Salvium One. The extensions currently include:
+
+- Anonymised Returns (used to return funds to the original sender, even if their wallet address is not known)
+- Spend Authority Proof (used to prove that the original sender will receive the returned funds, and not a 3rd party)
+        
+### 8.2 Return transactions
+
+Return transactions are not considered to be internal.
+
+Return transactions are designed to help comply with MiCA and other regulatory frameworks, and provide a pseudonymous means of returning funds to an originating sender without knowing their wallet address.
+
+Return transactions rely on the generation of a public key `F`, which is combined with a shared-secret `k_rp` (formerly `y`) (that only sender and receiver can know) to generate a onetime address <code>K<sub>o</sub><sup>return</sup></code> that will be received by the original sender of the transaction. Each output in a transaction (excepting the change) is required to provide a valid `F` public key.
+
+Return transactions are based on a <a target="_blank" href="https://github.com/monero-project/research-lab/issues/53">proposal originally made in 2019 by knacc</a>, and have been implemented in Salvium since the initial release in July 2024.
+
+### 8.3 Spend authority proof
+
+When sending funds, it is possible for the wallet code to redirect the change output of a transaction to a 3rd-party wallet instead of the sender's wallet. However, Salvium requires that the change output does return to the sender to ensure correct operation of the <code>return_payment</code> functionality.
+
+In order to prevent any such redirection, SPARC provides a "spend authority proof" that uses an advanced Schnorr proof in zero knowledge to show that the sender has spend authority for the wallet to which the change output is being sent (and therefore also has spend authority for any returned funds that may be sent). The proof is included in the public transaction data, and is verified by nodes before accepting a transaction.
+
+The proof relies on the sender (prover) producing the following structure:
+<pre>
+  struct spend_authority_proof {  
+    rct::key commitment<sub>G</sub>;  // Commitment to x (G component)  
+    rct::key commitment<sub>T</sub>;  // Commitment to y (T component)  
+    rct::key challenge;    // Challenge scalar (c) - does NOT get serialized  
+    rct::key response<sub>x</sub>;    // Response for x (z1)  
+    rct::key response<sub>y</sub>;    // Response for y (z2)  
+  };
+</pre>
+The `generate_carrot_spend_authority_proof()` function performs the following steps:
+
+1. Generate random scalars <code>r<sub>1</sub>,r<sub>2</sub></code>
+2. Calculate commitments:
+    - <code>commitment<sub>G</sub> = r<sub>1</sub>G</code>
+    - <code>commitment<sub>T</sub> = r<sub>2</sub>T</code>
+3. Calculate the challenge scalar <code>challenge = H<sub>p</sub><sup>2</sup>({commitment<sub>G</sub>, commitment<sub>T</sub>, K<sub>o</sub>})</code>
+4. Calculate the responses for each commitment:
+    - <code>response<sub>x</sub> = rct::addKeys(r<sub>1</sub>, rct::scalarmultKey(challenge, x))</code>
+    - <code>response<sub>y</sub> = rct::addKeys(r<sub>2</sub>, rct::scalarmultKey(challenge, y))</code>
+5. Construct and return the proof
+
+The verifier (typically a node) takes the proof and performs the following steps:
+
+1. Recalculate the challenge scalar <code>recalculated_challenge = H<sub>p</sub><sup>2</sup>({commitment<sub>G</sub>, commitment<sub>T</sub>, K<sub>o</sub>})</code>
+2. Calculate <code>z<sub>1</sub>G, z<sub>2</sub>T</code>
+    - <code>z<sub>1</sub>G = rct::scalarmultBase(proof.response<sub>x</sub>)</code>
+    - <code>z<sub>2</sub>T = rct::scalarmultKey(proof.response<sub>y</sub>, rct::T)</code>
+3. Calculate <code>result = z<sub>1</sub>G + z<sub>2</sub>T - cK<sub>o</sub></code>
+4. Verify <code>result ?= rct::addKeys(commitment<sub>G</sub>, commitment<sub>T</sub>)</code>
+
+Spend authority proofs are included in Salvium One onwards. If the verifier does not receive the expected result, the transaction will be rejected.
+    
+## 9. Balance recovery
+
+### 9.1 Enote Scan
 
 If this enote scan returns successfully, we will be able to recover the address spend pubkey, amount, payment ID, and enote type. Additionally, a successful return guarantees that A) the enote is uniquely addressed to our account, B) Janus attacks are mitigated, and C) burning bug attacks due to duplicate output pubkeys are mitigated. Note, however, that a successful return does *NOT* guarantee that the enote is spendable (i.e. that the recipient will be able to recover `x, y` such that <code>K<sub>o</sub> = x G + y T</code>).
 
@@ -465,7 +527,9 @@ We perform the scan process once with <code>s<sub>sr</sub> = 8 k<sub>v</sub> D<s
 1. Let <code>k<sub>t</sub><sup>o</sup>' = ScalarDerive("Carrot key extension T" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| C<sub>a</sub>)</code>
 1. Let <code>K<sub>s</sub><sup>j</sup>' = K<sub>o</sub> - k<sub>g</sub><sup>o</sup>' G - k<sub>t</sub><sup>o</sup>' T</code>
 1. If a coinbase enote and <code>K<sub>s</sub><sup>j</sup>' ≠ K<sub>s</sub></code>, then <code><b>ABORT</b></code>
-1. If <code>s<sub>sr</sub> == s<sub>vb</sub></code> (i.e. performing an internal scan), then jump to step 36
+1. If <code>s<sub>sr</sub> == s<sub>vb</sub></code> (i.e. performing an internal scan), then jump to step 38
+1. If <code>k<sub>v</sub> K<sub>change</sub><sup>o</sup></code> does not exist in Salvium TX lookup table, then jump to step 23
+1. PLACEHOLDER FOR HANDLING RETURN_PAYMENT
 1. Let <code>m<sub>pid</sub> = SecretDerive("Carrot encryption mask pid" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| K<sub>o</sub>)</code>
 1. Set <code>pid' = pid<sub>enc</sub> ⊕ m<sub>pid</sub></code>
 1. Let <code>m<sub>anchor</sub> = SecretDerive("Carrot encryption mask anchor" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| K<sub>o</sub>)</code>
@@ -474,44 +538,44 @@ We perform the scan process once with <code>s<sub>sr</sub> = 8 k<sub>v</sub> D<s
 1. Let <code>K<sub>v</sub><sup>j</sup>' = k<sub>v</sub> K<sub>base</sub></code>
 1. Let <code>d<sub>e</sub>' = ScalarDerive("Carrot sending key normal" \|\| anchor' \|\| input_context \|\| K<sub>s</sub><sup>j</sup>' \|\| K<sub>v</sub><sup>j</sup>' \|\| pid')</code>
 1. Let <code>D<sub>e</sub>' = d<sub>e</sub>' ConvertPointE(K<sub>base</sub>)</code>
-1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 36
+1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 38
 1. Set `pid' = nullpid`
 1. Let <code>d<sub>e</sub>' = ScalarDerive("Carrot sending key normal" \|\| anchor' \|\| input_context \|\| K<sub>s</sub><sup>j</sup>' \|\| K<sub>v</sub><sup>j</sup>' \|\| pid')</code>
 1. Let <code>D<sub>e</sub>' = d<sub>e</sub>' ConvertPointE(K<sub>base</sub>)</code>
-1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 36
+1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 38
 1. Let <code>anchor<sub>sp</sub> = SecretDerive("Carrot janus anchor special" \|\| D<sub>e</sub> \|\| input_context \|\| K<sub>o</sub> \|\| k<sub>v</sub> \|\| K<sub>s</sub>)</code>
 1. If <code>anchor' ≠ anchor<sub>sp</sub></code>, then <code><b>ABORT</b></code>
 1. Return successfully!
 
-### 8.2 Determining spendability and computing key images
+### 9.2 Determining spendability and computing key images
 
 An enote is spendable if the computed nominal address spend pubkey <code>K<sub>s</sub><sup>j</sup>'</code> from the enote scan process is one that the recipient knows how to derive. However, the enote scan process does not inform the sender how to derive the subaddress. One method of quickly checking whether a nominal address spend pubkey is derivable, and thus spendable, is a *subaddress table*. A subaddress table maps precomputed address spend pubkeys to their index `j`. Once the subaddress index for an enote is determined, we can begin computing the key image.
 
-#### 8.2.1 Legacy key hierarchy key images
+#### 9.2.1 Legacy key hierarchy key images
 
 If `j ≠ 0`, then let <code>k<sub>sub_ext</sub><sup>j</sup> = ScalarDeriveLegacy(IntToBytes64(8) \|\| k<sub>v</sub> \|\| IntToBytes32(j<sub>major</sub>) \|\| IntToBytes32(j<sub>minor</sub>))</code>, otherwise let <code>k<sub>sub_ext</sub><sup>j</sup> = 0</code>.
 
 The key image is computed as: <code>L = (k<sub>s</sub> + k<sub>sub_ext</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup>) H<sub>p</sub><sup>2</sup>(K<sub>o</sub>)</code>.
 
-#### 8.2.2 New key hierarchy key images
+#### 9.2.2 New key hierarchy key images
 
 If `j ≠ 0`, then let <code>k<sub>sub_scal</sub><sup>j</sup> = ScalarDerive("Carrot subaddress scalar" \|\| s<sub>gen</sub><sup>j</sup> \|\| K<sub>s</sub> \|\| K<sub>v</sub> \|\| IntToBytes32(j<sub>major</sub>) \|\| IntToBytes32(j<sub>minor</sub>))</code>, otherwise let <code>k<sub>sub_scal</sub><sup>j</sup> = 1</code>.
 
 The key image is computed as: <code>L = (k<sub>gi</sub> * k<sub>sub_scal</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup>) H<sub>p</sub><sup>2</sup>(K<sub>o</sub>)</code>.
 
-### 8.3 Handling key images and calculating balance
+### 9.3 Handling key images and calculating balance
 
 If a scanner successfully scans any enote within a transaction, they should save all those key images indefinitely as "potentially spent". The rest of the ledger's key images can be discarded. Then, the key images for each enote should be calculated. The "unspent" enotes are determined as those whose key images is not within the set of potentially spent key images. The sum total of the amounts of these enotes is the current balance of the wallet, and the unspent enotes can be used in future input proofs.
 
-## 9. Security properties
+## 10. Security properties
 
 Below are listed some security properties which are to hold for Carrot. Unless otherwise specified, it is assumed that no participant can efficiently solve the decisional Diffie-Hellman problem in Curve25519 and Ed25519 (i.e. the decisional Diffie-Hellman assumption [[17](https://crypto.stanford.edu/~dabo/pubs/papers/DDH.pdf)] holds).
 
-### 9.1 Balance recovery security
+### 10.1 Balance recovery security
 
 The term "honest receiver" below means an entity with certain private key material correctly executing the balance recovery instructions of the addressing protocol as described above. A receiver who correctly follows balance recovery instructions but lies to the sender whether they received funds is still considered "honest". Likewise, an "honest sender" is an entity who follows the sending instructions of the addressing protocol as described above.
 
-#### 9.1.1 Completeness
+#### 10.1.1 Completeness
 
 An honest sender who sends amount `a` and payment ID `pid` to address <code>(is_main, K<sub>s</sub><sup>j</sup>, K<sub>v</sub><sup>j</sup>)</code>, internally or externally, can be guaranteed that the honest receiver who derived that address will:
 
@@ -520,59 +584,59 @@ An honest sender who sends amount `a` and payment ID `pid` to address <code>(is_
 
 This is to be achieved without any other interactivity.
 
-#### 9.1.2 Spend Binding
+#### 10.1.2 Spend Binding
 
 If an honest receiver recovers `x` and `y` for an enote such that <code>K<sub>o</sub> = x G + y T</code>, then it is guaranteed within a security factor that no other entity without knowledge of <code>k<sub>ps</sub></code> (or <code>k<sub>s</sub></code> for legacy key hierarchies) will also be able to find `x` and `y`.
 
-#### 9.1.3 Enote Scan Binding
+#### 10.1.3 Enote Scan Binding
 
 No two honest receivers using different values of <code>k<sub>v</sub></code> for external scans or <code>s<sub>vb</sub></code> for internal scans will both successfully return from the enote scan process given the same enote, even if that enote was constructed dishonestly.
 
-#### 9.1.4 Burning Bug Resistance
+#### 10.1.4 Burning Bug Resistance
 
 For any <code>K<sub>o</sub></code>, it is computationally intractable to find two unique values of `input_context` such that an honest receiver will determine both enotes to be spendable. Recall that spendability is determined as whether <code>K<sub>s</sub><sup>j</sup>' = K<sub>o</sub> - k<sub>g</sub><sup>o</sup> G - k<sub>t</sub><sup>o</sup> T</code> is an address spend pubkey that the recipient knows how to derive from their account secrets.
 
-#### 9.1.5 Janus Attack Resistance
+#### 10.1.5 Janus Attack Resistance
 
 There is no algorithm that, without knowledge of the recipient's private view key <code>k<sub>v</sub></code>, allows a sender to construct an enote using two or more honestly-derived non-integrated addresses which successfully passes the enote scan process when the two addresses where derived from the same account, but fails when the addresses are unrelated.
 
 More concretely, it is computationally intractable, without knowledge of the recipient's private view key <code>k<sub>v</sub></code>, to construct an external enote which successfully passes the enote scan process such that the recipient's computed nominal address spend pubkey <code>K<sub>s</sub><sup>j</sup>' = K<sub>o</sub> - k<sub>g</sub><sup>o</sup> G - k<sub>t</sub><sup>o</sup> T</code> does not match the shared secret <code>s<sub>sr</sub> = 8 r ConvertPointE(K<sub>v</sub><sup>j</sup>')</code> for some sender-chosen `r`. This narrowed statement makes the informal assumption that using the address view spend pubkey for the Diffie-Hellman exchange and nominally recomputing its correct address spend pubkey leaves no room for a Janus attack.
 
-### 9.2 Unlinkability
+### 10.2 Unlinkability
 
-#### 9.2.1 Computational Address-Address Unlinkability
+#### 10.2.1 Computational Address-Address Unlinkability
 
 A third party cannot determine if two non-integrated addresses share the same <code>k<sub>v</sub></code> with any better probability than random guessing.
 
-#### 9.2.2 Computational Address-Enote Unlinkability
+#### 10.2.2 Computational Address-Enote Unlinkability
 
 A third party cannot determine if an address is the destination of an enote with any better probability than random guessing, even if they know the destination address.
 
-#### 9.2.3 Computational Enote-Enote Unlinkability
+#### 10.2.3 Computational Enote-Enote Unlinkability
 
 A third party cannot determine if two enotes have the same destination address with any better probability than random guessing, even if they know the destination address.
 
-#### 9.2.4 Computational Enote-Key Image Unlinkability
+#### 10.2.4 Computational Enote-Key Image Unlinkability
 
 A third party cannot determine if any key image is *the* key image for any enote with any better probability than random guessing, even if they know the destination address.
 
-### 9.3 Forward Secrecy
+### 10.3 Forward Secrecy
 
 Forward secrecy refers to the preservation of privacy properties of past transactions against a future adversary capable of solving the elliptic curve discrete logarithm problem (ECDLP), for example a quantum computer. We refer to an entity with this capability as a *SDLP* (Solver of the Discrete Log Problem). We assume that the properties of secure hash functions still apply to SDLPs (i.e. collision-resistance, preimage-resistance, one-way).
 
-#### 9.3.1 Address-Conditional Forward Secrecy
+#### 10.3.1 Address-Conditional Forward Secrecy
 
 A SDLP can learn no receiver or amount information about a transaction output, nor where it is spent, without knowing a receiver's public address.
 
-#### 9.3.2 Internal Forward Secrecy
+#### 10.3.2 Internal Forward Secrecy
 
 Even with knowledge of <code>s<sub>ga</sub></code>, <code>k<sub>ps</sub></code>, <code>k<sub>gi</sub></code>, <code>k<sub>v</sub></code>, a SDLP without explicit knowledge of <code>s<sub>vb</sub></code> will not be able to discern where internal enotes are received, where/if they are spent, nor the amounts with any better probability than random guessing.
 
-### 9.4 Indistinguishability
+### 10.4 Indistinguishability
 
 We define multiple processes by which public value representations are created as "indistinguishable" if a SDLP, without knowledge of public addresses or private account keys, cannot determine by which process the public values were created with any better probability than random guessing. The processes in question are described below.
 
-#### 9.4.1 Transaction output random indistinguishability
+#### 10.4.1 Transaction output random indistinguishability
 
 Carrot transaction outputs are indistinguishable from random transaction outputs. The Carrot transaction output process is described earlier in this document. The random transaction output process is modeled as follows:
 
@@ -580,7 +644,7 @@ Carrot transaction outputs are indistinguishable from random transaction outputs
 2. Set <code>K<sub>o</sub> = r<sub>1</sub> G</code>
 3. Set <code>C<sub>a</sub> = r<sub>2</sub> G</code>
 
-#### 9.4.2 Ephemeral pubkey random indistinguishability
+#### 10.4.2 Ephemeral pubkey random indistinguishability
 
 Carrot ephemeral pubkeys are indistinguishable from random Curve25519 pubkeys. The Carrot ephemeral pubkey process is described earlier in this document. The random ephemeral pubkey process is modeled as follows:
 
@@ -589,7 +653,7 @@ Carrot ephemeral pubkeys are indistinguishable from random Curve25519 pubkeys. T
 
 Note that in Carrot ephemeral pubkey construction, the ephemeral private key <code>d<sub>e</sub></code>, unlike most X25519 private keys, is derived without key clamping. Multiplying by this unclamped key makes it so the resultant pubkey is indistinguishable from a random pubkey (*needs better formalizing*).
 
-#### 9.4.3 Other enote component random indistinguishability
+#### 10.4.3 Other enote component random indistinguishability
 
 The remaining Carrot enote components are indistinguishable from random byte strings. The Carrot enote process is described earlier in this document. The random enote byte string process is modeled as follows:
 
@@ -598,13 +662,13 @@ The remaining Carrot enote components are indistinguishable from random byte str
 3. Sample <code>vt = RandBytes(3)</code>
 4. Sample <code>pid<sub>enc</sub> = RandBytes(8)</code>
 
-## 10. Credits
+## 11. Credits
 
 Special thanks to everyone who commented and provided feedback on the original [Jamtis gist](https://gist.github.com/tevador/50160d160d24cfc6c52ae02eb3d17024). Many of the ideas were incorporated in this document.
 
 A *very* special thanks to @tevador, who wrote up the Jamtis and Jamtis-RCT specifications, which were the foundation of this document, containing most of the transaction protocol math.
 
-## 11. Glossary
+## 12. Glossary
 
 - *Amount Commitment* - An elliptic curve point, in the form of a Pederson Commitment [[18](https://www.getmonero.org/resources/moneropedia/pedersen-commitment.html)], which is used to represent hidden amounts in transaction outputs in RingCT and FCMP++
 - *Burning Bug Attack* - An attack where an exploiter duplicates an output pubkey and tricks the recipient into accepting both, even though only one can be spent
@@ -637,7 +701,7 @@ A *very* special thanks to @tevador, who wrote up the Jamtis and Jamtis-RCT spec
 - *View Tag* - A small enote component, calculated as a partial hash of the sender-receiver shared key, which is checked early in the balance recovery process to optimize scanning performance
 - *Wallet* - A collection of private key data, cached ledger state, and other information which is used to interact with the shared ledger
 
-## 12. References
+## 13. References
 
 1. https://github.com/monero-project/research-lab/blob/master/whitepaper/whitepaper.pdf
 1. https://www.getmonero.org/resources/moneropedia/paymentid.html

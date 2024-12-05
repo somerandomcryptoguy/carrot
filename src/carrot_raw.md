@@ -313,10 +313,11 @@ For each transaction, we assign a value `input_context`, whose purpose is to be 
 
 | transaction type | `input_context`                                   |
 |----------------- |-------------------------------------------------- |
-| coinbase         | <code>"C" \|\| IntToBytes256(block height)</code> |
+| coinbase (miner) | <code>"C" \|\| IntToBytes256(block height)</code> |
+| protocol         | <code>"P" \|\| IntToBytes256(block height)</code> |
 | non-coinbase     | <code>"R" \|\| first spent key image</code>       |
 
-This uniqueness is guaranteed by consensus rules: there is exactly one coinbase transaction per block height, and all key images are unique. Indirectly binding output pubkeys to this value helps to mitigate burning bugs.
+This uniqueness is guaranteed by consensus rules: there is exactly one coinbase and one protocol transaction per block height, and all key images are unique. Indirectly binding output pubkeys to this value helps to mitigate burning bugs.
 
 ### Enote format
 
@@ -361,19 +362,22 @@ The enote components are derived from the shared secrets <code>s<sub>sr</sub></c
 |<code>anchor<sub>norm</sub></code>|janus anchor, normal| <code>anchor<sub>norm</sub> = RandBytes(16)</code> |
 |<code>anchor<sub>sp</sub></code>|janus anchor, special| <code>anchor<sub>sp</sub> = SecretDerive("Carrot janus anchor special" \|\| D<sub>e</sub> \|\| input_context \|\| K<sub>o</sub> \|\| k<sub>v</sub> \|\| K<sub>s</sub>)</code> |
 |<code>d<sub>e</sub></code>|ephemeral private key| <code>d<sub>e</sub> = ScalarDerive("Carrot sending key normal" \|\| anchor<sub>norm</sub> \|\| input_context \|\| K<sub>s</sub><sup>j</sup> \|\| K<sub>v</sub><sup>j</sup> \|\| pid)</code> |
+|<code>y</code>|return payment scalar| <code>y = ScalarDerive("Carrot return address scalar" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| C<sub>a</sub>)</code> |
 
 The variable `enote_type` is `"payment"` or `"change"` depending on the human-meaningful tag that a sender wants to express to the recipient. However, `enote_type` must be equal to `"payment"` for coinbase enotes.
 
 #### Component Values
 
-| Symbol                           | Name                  | Derivation |
-|----------------------------------|-----------------------|------------|
-|<code>K<sub>o</sub></code>        | output pubkey         | <code>K<sub>o</sub> = K<sub>s</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
-|<code>C<sub>a</sub></code>        | amount commitment     | <code>C<sub>a</sub> = k<sub>a</sub> G + a H</code> |
-|<code>a<sub>enc</sub></code>      | encrypted amount      | <code>a<sub>enc</sub> = a ⊕ m<sub>a</sub></code>   |
-|`vt`                              |view tag               | <code>vt = SecretDerive("Carrot view tag" \|\| s<sub>sr</sub> \|\| input_context \|\| K<sub>o</sub>)</code> |
-|<code>anchor<sub>enc</sub></code> |encrypted Janus anchor | <code>anchor<sub>enc</sub> = (anchor<sub>sp</sub> if <i>special enote</i>, else anchor<sub>norm</sub>) ⊕ m<sub>anchor</sub></code> |
-|<code>pid<sub>enc</sub></code>    |encrypted payment ID   | <code>pid<sub>enc</sub> = pid ⊕ m<sub>pid</sub></code> |
+| Symbol                                     | Name                   | Derivation |
+|--------------------------------------------|------------------------|------------|
+|<code>K<sub>o</sub></code>                  | output pubkey          | <code>K<sub>o</sub> = K<sub>s</sub><sup>j</sup> + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
+|<code>K<sub>o</sub><sup>return</sup></code> | output pubkey (return) | <code>K<sub>o</sub><sup>return</sup> = (y F) + k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code> |
+|<code>C<sub>a</sub></code>                  | amount commitment      | <code>C<sub>a</sub> = k<sub>a</sub> G + a H</code> |
+|<code>a<sub>enc</sub></code>                | encrypted amount       | <code>a<sub>enc</sub> = a ⊕ m<sub>a</sub></code>   |
+|`vt`                                        | view tag               | <code>vt = SecretDerive("Carrot view tag" \|\| s<sub>sr</sub> \|\| input_context \|\| K<sub>o</sub>)</code> |
+|<code>anchor<sub>enc</sub></code>           | encrypted Janus anchor | <code>anchor<sub>enc</sub> = (anchor<sub>sp</sub> if <i>special enote</i>, else anchor<sub>norm</sub>) ⊕ m<sub>anchor</sub></code> |
+|<code>pid<sub>enc</sub></code>              | encrypted payment ID   | <code>pid<sub>enc</sub> = pid ⊕ m<sub>pid</sub></code> |
+|<code>F</code>                              |return address EC point | <code>F = (y<sup>-1</sup>) k<sub>v</sub> K<sub>o</sub><sup>change</sup></code> |
 
 The view tag binds to `input_context` so that an external observer (i.e. someone without knowledge of <code>s<sub>sr</sub></code>) cannot simply copy <code>D<sub>e</sub></code>, <code>K<sub>o</sub></code>, and `vt` into a new transaction to force a view tag match. Binding to `input_context` causes the view tag of a copied enote to match with the same probability as any random, unrelated enote.
 
@@ -438,6 +442,64 @@ Coinbase transactions are not considered to be internal.
 
 Miners should continue the practice of only allowing main addresses for the destinations of coinbase transactions in Carrot. This is because, unlike normal enotes, coinbase enotes do not contain an amount commitment, and thus scanning a coinbase enote commitment has no "hard target". If subaddresses can be the destinations of coinbase transactions, then the scanner *must* have their subaddress table loaded and populated to correctly scan coinbase enotes. If only main addresses are allowed, then the scanner does not need the table and can instead simply check whether <code>K<sub>s</sub><sup>0</sup> ?= K<sub>o</sub> - k<sub>g</sub><sup>o</sup> G + k<sub>t</sub><sup>o</sup> T</code>.
 
+## Spend Proof and Anonymised Returns for CARROT (SPARC)
+
+### Overview
+
+SPARC is a suite of extensions to the CARROT transaction scheme, all of which are built into Salvium One. The extensions currently include:
+
+- Anonymised Returns (used to return funds to the original sender, even if their wallet address is not known)
+- Spend Authority Proof (used to prove that the original sender will receive the returned funds, and not a 3rd party)
+        
+### Return transactions
+
+Return transactions are not considered to be internal.
+
+Return transactions are designed to help comply with MiCA and other regulatory frameworks, and provide a pseudonymous means of returning funds to an originating sender without knowing their wallet address.
+
+Return transactions rely on the generation of a public key `F`, which is combined with a shared-secret `k_rp` (formerly `y`) (that only sender and receiver can know) to generate a onetime address <code>K<sub>o</sub><sup>return</sup></code> that will be received by the original sender of the transaction. Each output in a transaction (excepting the change) is required to provide a valid `F` public key.
+
+Return transactions are based on a <a target="_blank" href="https://github.com/monero-project/research-lab/issues/53">proposal originally made in 2019 by knacc</a>, and have been implemented in Salvium since the initial release in July 2024.
+
+### Spend authority proof
+
+When sending funds, it is possible for the wallet code to redirect the change output of a transaction to a 3rd-party wallet instead of the sender's wallet. However, Salvium requires that the change output does return to the sender to ensure correct operation of the <code>return_payment</code> functionality.
+
+In order to prevent any such redirection, SPARC provides a "spend authority proof" that uses an advanced Schnorr proof in zero knowledge to show that the sender has spend authority for the wallet to which the change output is being sent (and therefore also has spend authority for any returned funds that may be sent). The proof is included in the public transaction data, and is verified by nodes before accepting a transaction.
+
+The proof relies on the sender (prover) producing the following structure:
+<pre>
+  struct spend_authority_proof {  
+    rct::key commitment<sub>G</sub>;  // Commitment to x (G component)  
+    rct::key commitment<sub>T</sub>;  // Commitment to y (T component)  
+    rct::key challenge;    // Challenge scalar (c) - does NOT get serialized  
+    rct::key response<sub>x</sub>;    // Response for x (z1)  
+    rct::key response<sub>y</sub>;    // Response for y (z2)  
+  };
+</pre>
+The `generate_carrot_spend_authority_proof()` function performs the following steps:
+
+1. Generate random scalars <code>r<sub>1</sub>,r<sub>2</sub></code>
+2. Calculate commitments:
+    - <code>commitment<sub>G</sub> = r<sub>1</sub>G</code>
+    - <code>commitment<sub>T</sub> = r<sub>2</sub>T</code>
+3. Calculate the challenge scalar <code>challenge = H<sub>p</sub><sup>2</sup>({commitment<sub>G</sub>, commitment<sub>T</sub>, K<sub>o</sub>})</code>
+4. Calculate the responses for each commitment:
+    - <code>response<sub>x</sub> = rct::addKeys(r<sub>1</sub>, rct::scalarmultKey(challenge, x))</code>
+    - <code>response<sub>y</sub> = rct::addKeys(r<sub>2</sub>, rct::scalarmultKey(challenge, y))</code>
+5. Construct and return the proof
+
+The verifier (typically a node) takes the proof and performs the following steps:
+
+1. Recalculate the challenge scalar <code>recalculated_challenge = H<sub>p</sub><sup>2</sup>({commitment<sub>G</sub>, commitment<sub>T</sub>, K<sub>o</sub>})</code>
+2. Calculate <code>z<sub>1</sub>G, z<sub>2</sub>T</code>
+    - <code>z<sub>1</sub>G = rct::scalarmultBase(proof.response<sub>x</sub>)</code>
+    - <code>z<sub>2</sub>T = rct::scalarmultKey(proof.response<sub>y</sub>, rct::T)</code>
+3. Calculate <code>result = z<sub>1</sub>G + z<sub>2</sub>T - cK<sub>o</sub></code>
+4. Verify <code>result ?= rct::addKeys(commitment<sub>G</sub>, commitment<sub>T</sub>)</code>
+
+Spend authority proofs are included in Salvium One onwards. If the verifier does not receive the expected result, the transaction will be rejected.
+    
 ## Balance recovery
 
 ### Enote Scan
@@ -465,7 +527,9 @@ We perform the scan process once with <code>s<sub>sr</sub> = 8 k<sub>v</sub> D<s
 1. Let <code>k<sub>t</sub><sup>o</sup>' = ScalarDerive("Carrot key extension T" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| C<sub>a</sub>)</code>
 1. Let <code>K<sub>s</sub><sup>j</sup>' = K<sub>o</sub> - k<sub>g</sub><sup>o</sup>' G - k<sub>t</sub><sup>o</sup>' T</code>
 1. If a coinbase enote and <code>K<sub>s</sub><sup>j</sup>' ≠ K<sub>s</sub></code>, then <code><b>ABORT</b></code>
-1. If <code>s<sub>sr</sub> == s<sub>vb</sub></code> (i.e. performing an internal scan), then jump to step 36
+1. If <code>s<sub>sr</sub> == s<sub>vb</sub></code> (i.e. performing an internal scan), then jump to step 38
+1. If <code>k<sub>v</sub> K<sub>change</sub><sup>o</sup></code> does not exist in Salvium TX lookup table, then jump to step 23
+1. PLACEHOLDER FOR HANDLING RETURN_PAYMENT
 1. Let <code>m<sub>pid</sub> = SecretDerive("Carrot encryption mask pid" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| K<sub>o</sub>)</code>
 1. Set <code>pid' = pid<sub>enc</sub> ⊕ m<sub>pid</sub></code>
 1. Let <code>m<sub>anchor</sub> = SecretDerive("Carrot encryption mask anchor" \|\| s<sub>sr</sub><sup>ctx</sup> \|\| K<sub>o</sub>)</code>
@@ -474,11 +538,11 @@ We perform the scan process once with <code>s<sub>sr</sub> = 8 k<sub>v</sub> D<s
 1. Let <code>K<sub>v</sub><sup>j</sup>' = k<sub>v</sub> K<sub>base</sub></code>
 1. Let <code>d<sub>e</sub>' = ScalarDerive("Carrot sending key normal" \|\| anchor' \|\| input_context \|\| K<sub>s</sub><sup>j</sup>' \|\| K<sub>v</sub><sup>j</sup>' \|\| pid')</code>
 1. Let <code>D<sub>e</sub>' = d<sub>e</sub>' ConvertPointE(K<sub>base</sub>)</code>
-1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 36
+1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 38
 1. Set `pid' = nullpid`
 1. Let <code>d<sub>e</sub>' = ScalarDerive("Carrot sending key normal" \|\| anchor' \|\| input_context \|\| K<sub>s</sub><sup>j</sup>' \|\| K<sub>v</sub><sup>j</sup>' \|\| pid')</code>
 1. Let <code>D<sub>e</sub>' = d<sub>e</sub>' ConvertPointE(K<sub>base</sub>)</code>
-1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 36
+1. If <code>D<sub>e</sub>' == D<sub>e</sub></code>, then jump to step 38
 1. Let <code>anchor<sub>sp</sub> = SecretDerive("Carrot janus anchor special" \|\| D<sub>e</sub> \|\| input_context \|\| K<sub>o</sub> \|\| k<sub>v</sub> \|\| K<sub>s</sub>)</code>
 1. If <code>anchor' ≠ anchor<sub>sp</sub></code>, then <code><b>ABORT</b></code>
 1. Return successfully!
